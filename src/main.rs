@@ -1,7 +1,14 @@
+#![warn(clippy::pedantic)]
+#![allow(clippy::cast_precision_loss, clippy::module_name_repetitions)]
+
+mod check_output;
 mod cli;
+mod get_threshold_values;
 mod stack;
 
-use std::fmt::Display;
+use ansi_term::Color;
+use check_output as output;
+
 use std::time::Instant;
 use std::{ffi::OsString, process::Command};
 
@@ -10,61 +17,37 @@ use rayon::prelude::*;
 use stack::Stack;
 
 use crate::cli::CliArgs;
-use rand::seq::SliceRandom;
+use crate::get_threshold_values::get_threshold_values;
 
-pub enum ExecError {
-    BadCommand(String),
-    StackBNotEmpty,
-    NotSorted,
-}
+const COLORS: [Color; 6] = [
+    Color::RGB(97, 5, 255),
+    Color::RGB(6, 186, 21),
+    Color::RGB(83, 255, 64),
+    Color::RGB(224, 242, 24),
+    Color::RGB(230, 135, 11),
+    Color::RGB(230, 11, 11),
+];
 
-impl Display for ExecError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BadCommand(x) => write!(f, "unknown command: {x}"),
-            Self::StackBNotEmpty => write!(f, "stack b is not empty"),
-            Self::NotSorted => write!(f, "stack a is not sorted"),
-        }
+fn print_correction_criteria(moves: &[usize], thresholds: &[usize], repeat_times: usize) {
+    println!();
+    println!("Correction Criterias:");
+    let thresholds_values = get_threshold_values(moves, thresholds);
+    let last_value = thresholds_values[thresholds.len()];
+    for (color, (threshold, value)) in COLORS.iter().zip(thresholds.iter().zip(thresholds_values)) {
+        let to_print = format!(
+            "Less than {}: {} ({:.2}%)",
+            threshold,
+            value,
+            value as f64 / repeat_times as f64 * 100.
+        );
+        println!("{}", color.paint(to_print));
     }
-}
-
-fn check_output(numbers: &[i32], output: &str) -> Result<usize, ExecError> {
-    let mut stack_a: Stack = Stack::from_iter(numbers.iter().copied());
-    let mut stack_b: Stack = Stack::with_capacity(numbers.len());
-    let mut nb_line = 0;
-    for line in output.lines().map(|x| x.trim()) {
-        nb_line += 1;
-        match line {
-            "sa" => stack_a.swap(),
-            "sb" => stack_b.swap(),
-            "ss" => {
-                stack_a.swap();
-                stack_b.swap()
-            }
-            "ra" => stack_a.rotate(),
-            "rb" => stack_b.rotate(),
-            "rr" => {
-                stack_a.rotate();
-                stack_b.rotate()
-            }
-            "rra" => stack_a.reverse_rotate(),
-            "rrb" => stack_b.reverse_rotate(),
-            "rrr" => {
-                stack_a.reverse_rotate();
-                stack_b.reverse_rotate()
-            }
-            "pa" => stack_a.receive_push_from_other(&mut stack_b),
-            "pb" => stack_b.receive_push_from_other(&mut stack_a),
-            command => return Err(ExecError::BadCommand(command.to_string())),
-        }
-    }
-    if !stack_b.is_empty() {
-        Err(ExecError::StackBNotEmpty)
-    } else if !stack_a.is_sorted() {
-        Err(ExecError::NotSorted)
-    } else {
-        Ok(nb_line)
-    }
+    let to_print = format!(
+        "No points: {} ({:.2}%)",
+        last_value,
+        last_value as f64 / repeat_times as f64 * 100.
+    );
+    println!("{}", COLORS.last().unwrap().paint(to_print));
 }
 
 fn main() {
@@ -78,14 +61,14 @@ fn main() {
         .map_init(rand::thread_rng, |mut rng, index| {
             let hi_bound = args.number_in_stack / 2;
             let lo_bound = -(args.number_in_stack / 2 + args.number_in_stack % 2);
-            let mut ps_args: Vec<i32> = (lo_bound..hi_bound).collect();
+            let mut ps_args: Stack = (lo_bound..hi_bound).map(|x| x * 100).collect();
             ps_args.shuffle(&mut rng);
             let output = Command::new(args.path.as_path())
                 .args(ps_args.iter().map(|x| OsString::from(x.to_string())))
                 .output()
                 .expect("Couldn't run push_swap");
             let output = String::from_utf8(output.stdout).expect("Non UTF-8 push_swap return");
-            let has_worked = check_output(&ps_args, &output);
+            let has_worked = output::check(ps_args, &output);
             match has_worked {
                 Ok(size) => size,
                 Err(e) => {
@@ -96,7 +79,7 @@ fn main() {
         })
         .collect();
     println!("Total time: {:?}", time.elapsed());
-    all_moves.sort();
+    all_moves.sort_unstable();
     println!("Best case: {}", all_moves.first().unwrap());
     println!("Worst case: {}", all_moves.last().unwrap());
     println!(
@@ -108,5 +91,23 @@ fn main() {
     } else {
         (all_moves[all_moves.len() / 2] + all_moves[all_moves.len() / 2 + 1]) / 2
     };
-    println!("Median case: {}", median);
+    println!("Median case: {median}");
+
+    match args.number_in_stack {
+        // If you wish to add more thresholds (replace what's between ``):
+        //
+        // `number_in_stack_required` => {
+        //     const THRESHOLDS: [usize; `number_of_thresholds`] = [`your_thresholds`];
+        //     print_correction_criteria(&all_moves, &THRESHOLDS, args.repeat_times);
+        // }
+        100 => {
+            const THRESHOLDS: [usize; 5] = [700, 900, 1_100, 1_300, 1_500];
+            print_correction_criteria(&all_moves, &THRESHOLDS, args.repeat_times);
+        }
+        500 => {
+            const THRESHOLDS: [usize; 5] = [5_500, 7_000, 8_500, 10_000, 11_500];
+            print_correction_criteria(&all_moves, &THRESHOLDS, args.repeat_times);
+        }
+        _ => (),
+    }
 }
